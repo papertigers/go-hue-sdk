@@ -7,8 +7,14 @@ import (
 	"time"
 )
 
-// Hue docs say to use "IpBridge" over "hue-bridgeid"
-const _SSDPIdentifier = "IpBridge"
+const (
+	// Hue docs say to use "IpBridge" over "hue-bridgeid"
+	_SSDPIdentifier = "IpBridge"
+
+	_DefaultBufferSize = 256
+	_DefaultTimeout    = 30 * time.Second
+	_DefaultNumBridges = 8
+)
 
 var _SSDPData = []string{
 	"M-SEARCH * HTTP/1.1",
@@ -24,9 +30,7 @@ type Bridge struct {
 
 // Discover Hue bridges via SSDP.
 // Returns a map of IP.String() to empty struct.
-func Discover() (map[string]struct{}, error) {
-	bridgeSet := make(map[string]struct{})
-
+func Discover() ([]string, error) {
 	rAddr, err := net.ResolveUDPAddr("udp4", "239.255.255.250:1900")
 	if err != nil {
 		return nil, err
@@ -50,18 +54,30 @@ func Discover() (map[string]struct{}, error) {
 	}
 
 	// Read responses back for short time period
-	timeoutDuration := 30 * time.Second
-	lAddr.SetReadDeadline(time.Now().Add(timeoutDuration))
+	timeoutDuration := _DefaultTimeout
+	var buf bytes.Buffer
+	buf.Grow(_DefaultBufferSize)
+
+	bridgeSet := make([]string, 0, _DefaultNumBridges)
 
 	for {
-		buffer := make([]byte, 256)
-		n, addr, err := lAddr.ReadFromUDP(buffer)
+		lAddr.SetReadDeadline(time.Now().Add(timeoutDuration))
+		buf.Reset()
+		n, addr, err := lAddr.ReadFromUDP(buf.Bytes())
 		if err != nil {
-			// TODO log error other than TimeOut
-			break
+			switch osErr := err.(*net.OpError); {
+			case osErr.Timeout():
+				// Timeout
+			case osErr.Temporary():
+				// Transient condition
+			default:
+				// Return what we have
+				return bridgeSet, err
+			}
 		}
-		if bytes.Contains(buffer[:n], []byte(_SSDPIdentifier)) {
-			bridgeSet[addr.IP.String()] = struct{}{}
+
+		if bytes.Contains(buf.Bytes()[:n], []byte(_SSDPIdentifier)) {
+			bridgeSet = append(bridgeSet, addr.IP.String())
 		}
 	}
 
